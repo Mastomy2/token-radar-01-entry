@@ -241,6 +241,29 @@ export function isRankable(p: SnapshotProtocol): boolean {
 }
 
 /**
+ * Snapshot sanity check: one warning per protocol whose fields cannot be scored as-is.
+ * A protocol with no name, a negative TVL, or a TVL of zero is skipped by the board, and a
+ * listed_at date that does not parse ages as unknown. Warnings are informational only; the
+ * board still scores every protocol that passes `isRankable`, so a bad row never blocks a run.
+ */
+export function validateSnapshot(snapshot: Snapshot): string[] {
+  const warnings: string[] = [];
+  for (const p of snapshot.protocols) {
+    if (!p.name || p.name.trim() === '') {
+      warnings.push(`protocol ${p.slug}: missing name`);
+      continue;
+    }
+    if (p.tvl_usd < 0) warnings.push(`${p.slug}: negative TVL ${p.tvl_usd}`);
+    if (p.tvl_usd === 0) warnings.push(`${p.slug}: zero TVL, implied value will be 1`);
+    if (p.listed_at !== null && !Number.isFinite(Date.parse(`${p.listed_at}T00:00:00Z`))) {
+      warnings.push(`${p.slug}: listed_at ${p.listed_at} does not parse, age treated as unknown`);
+    }
+    if (p.mcap_usd !== null && p.mcap_usd < 0) warnings.push(`${p.slug}: negative market cap`);
+  }
+  return warnings;
+}
+
+/**
  * The market multiples, computed from the snapshot's own live-token protocols at run time.
  * Each category's multiple is the median market-cap / TVL of its live-token protocols, when at
  * least `multiple_min_samples` of them carry a market cap; otherwise the category falls back to
