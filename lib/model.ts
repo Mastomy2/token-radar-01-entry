@@ -259,6 +259,12 @@ export function validateSnapshot(snapshot: Snapshot): string[] {
       warnings.push(`${p.slug}: listed_at ${p.listed_at} does not parse, age treated as unknown`);
     }
     if (p.mcap_usd !== null && p.mcap_usd < 0) warnings.push(`${p.slug}: negative market cap`);
+    if (p.category === null && isRankable(p)) {
+      warnings.push(`${p.slug}: rankable but uncategorised, scored at the global multiple`);
+    }
+    if (p.change_7d !== null && !Number.isFinite(p.change_7d)) {
+      warnings.push(`${p.slug}: change_7d is not finite, growth treated as zero`);
+    }
   }
   return warnings;
 }
