@@ -83,6 +83,12 @@ for (const name of shots) {
     process.stderr.write(`token radar: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters\n`);
     process.exit(1);
   }
+  const shot = readFileSync(join(out, 'screenshots', name));
+  const shotW = shot.readUInt32BE(16);
+  const shotH = shot.readUInt32BE(20);
+  if (Math.min(shotW, shotH) < 800) {
+    process.stderr.write(`token radar: screenshots/${name} is ${shotW}x${shotH}: short side under 800px, the dev gate needs at least 800\n`);
+  }
 }
 
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
