@@ -20,6 +20,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSyn
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import type { BoardRow } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -37,6 +38,52 @@ function arg(name: string, fallback: string): string {
   return withEquals === undefined ? fallback : withEquals.slice(name.length + 3);
 }
 
+/** Strict board audit, run before anything is written: every row must carry a
+ *  positive implied value and, where it has one, a symbol no other row uses.
+ *  The gate's own boardIssue checks coverage, ranks, order and farm steps; this
+ *  audit adds the data-integrity half — a board that passes both cannot ship a
+ *  row with a nonsense value or two rows claiming the same ticker. Returns the
+ *  first problem found, or null when the board is clean. */
+function strictBoardIssue(board: BoardRow[]): string | null {
+  const seenSymbols = new Map<string, number>();
+  for (let i = 0; i < board.length; i++) {
+    const row = board[i]!;
+    const where = `row ${row.rank} (${row.slug})`;
+    if (row.rank !== i + 1) return `${where}: rank is ${row.rank}, expected ${i + 1}`;
+    if (row.slug.trim().length === 0) return `row ${i + 1}: slug is empty`;
+    if (row.name.trim().length === 0) return `${where}: name is empty`;
+    if (!Number.isFinite(row.implied_value_usd) || row.implied_value_usd <= 0) {
+      return `${where}: implied value is ${row.implied_value_usd}, must be a finite number above 0`;
+    }
+    if (!Number.isFinite(row.tvl_usd) || row.tvl_usd < 0) {
+      return `${where}: TVL is ${row.tvl_usd}, must be a finite number at or above 0`;
+    }
+    if (row.category !== null && row.category.trim().length === 0) return `${where}: category is blank`;
+    if (row.chains.length === 0) return `${where}: no chains listed`;
+    if (row.change_7d !== null && !Number.isFinite(row.change_7d)) {
+      return `${where}: 7d change is not a finite number`;
+    }
+    if (row.age_days !== null && (!Number.isFinite(row.age_days) || row.age_days < 0)) {
+      return `${where}: age is ${row.age_days}, must be a finite number at or above 0`;
+    }
+    if (row.symbol !== null) {
+      const symbol = row.symbol.trim();
+      if (symbol.length === 0) return `${where}: symbol is blank`;
+      const key = symbol.toUpperCase();
+      const first = seenSymbols.get(key);
+      if (first !== undefined) return `${where}: symbol ${symbol} is already used by row ${first}`;
+      seenSymbols.set(key, row.rank);
+    }
+    if (row.farm_steps.length !== 7) {
+      return `${where}: farm plan has ${row.farm_steps.length} steps, the radar promises 7`;
+    }
+    for (const step of row.farm_steps) {
+      if (step.trim().length === 0) return `${where}: farm plan has a blank step`;
+    }
+  }
+  return null;
+}
+
 const inputArg = arg('input', '/input');
 const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
 if (!existsSync(inputFile)) {
@@ -50,6 +97,11 @@ const { board, radar } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {
   process.stderr.write(`token radar: the model wrote a board the gate refuses: ${issue}\n`);
+  process.exit(1);
+}
+const strictIssue = strictBoardIssue(board);
+if (strictIssue !== null) {
+  process.stderr.write(`token radar: the board failed the strict audit: ${strictIssue}\n`);
   process.exit(1);
 }
 
@@ -96,5 +148,6 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar: strict audit passed: ${board.length} rows, positive implied values, no duplicate symbols\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
