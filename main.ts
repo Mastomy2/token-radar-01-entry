@@ -20,6 +20,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSyn
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { buildRadarFitted } from './lib/model.ts';
 import type { BoardRow } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
@@ -93,7 +94,7 @@ if (!existsSync(inputFile)) {
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
 const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
-const { board, radar } = buildRadar(snapshot);
+const { board, radar } = buildRadarFitted(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {
   process.stderr.write(`token radar: the model wrote a board the gate refuses: ${issue}\n`);
@@ -148,6 +149,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar: radar-3 fit on ${radar.fit?.liveFittable ?? 0} live protocols: held-out median log error ${radar.fit?.folds.map((f) => f.heldOutMedianAbsLogError).join(' / ') ?? 'n/a'} vs radar-2 baseline ${radar.fit?.folds.map((f) => f.baselineMedianAbsLogError).join(' / ') ?? 'n/a'}\n` +
     `token radar: strict audit passed: ${board.length} rows, positive implied values, no duplicate symbols\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
