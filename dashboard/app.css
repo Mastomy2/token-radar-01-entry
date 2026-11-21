@@ -172,3 +172,14 @@ tbody tr[data-selected="true"] { background: #1a2b22; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
+
+/* radar-3 additions: the integrity strip, the fit panel and the verdict column. */
+.integrity .strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--step-3); margin-top: var(--step-3); }
+.strip-item { border: 1px solid var(--border); border-radius: var(--radius-control); padding: var(--step-3) var(--step-4); background: var(--surface-2); }
+.strip-item b { display: block; margin-bottom: var(--step-1); }
+.strip-mark { font-weight: 700; margin-right: var(--step-2); font-family: var(--font-num); }
+.strip-item.pass .strip-mark { color: var(--accent); }
+.strip-item.warn .strip-mark { color: var(--amber); }
+.strip-item.warn { border-color: var(--amber); }
+.fit .mult-table { margin-top: var(--step-3); }
+.verdict { font-weight: 600; white-space: nowrap; }

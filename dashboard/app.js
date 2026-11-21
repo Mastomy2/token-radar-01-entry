@@ -34,6 +34,10 @@
     return Math.max(0, Math.round(days)) + 'd';
   }
   function fmtMult(n) { return n.toFixed(3) + 'x'; }
+  function fmtOdds(n) {
+    if (n === null || n === undefined || !isFinite(n)) return 'n/a';
+    return (n * 100).toFixed(1) + '%';
+  }
 
   // The model in one function: the page recomputes a row from the snapshot figures and checks the
   // number board.json carries, so the page's code and the board's data are visibly the same arithmetic.
@@ -133,6 +137,8 @@
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
       else if (key === 'multiple') { av = a.category_multiple; bv = b.category_multiple; }
+      else if (key === 'expected') { av = a.expected_value_usd; bv = b.expected_value_usd; }
+      else if (key === 'odds') { av = a.launch_odds; bv = b.launch_odds; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -265,6 +271,9 @@
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
         )),
+        el('td', { class: 'num', text: fmtOdds(r.launch_odds) }),
+        el('td', { class: 'num', text: fmtUsd(r.expected_value_usd) }),
+        el('td', null, el('span', { class: 'verdict', text: r.farm_verdict || '' })),
         el('td', null, el('span', { class: 'status', text: 'no token' }))
       );
       tbody.appendChild(tr);
@@ -281,6 +290,9 @@
             sortHeader('age', 'Age'),
             sortHeader('multiple', 'Multiple'),
             sortHeader('implied', 'Implied value'),
+            sortHeader('odds', 'Launch odds'),
+            sortHeader('expected', 'Expected value'),
+            el('th', { scope: 'col', text: 'Farm verdict' }),
             el('th', { scope: 'col', text: 'Token' })
           )),
           tbody
@@ -345,7 +357,7 @@
     var mfOut = el('output', { text: String(state.sandbox.maturityFloor.toFixed(2)) });
     mf.addEventListener('input', function () { state.sandbox.maturityFloor = parseFloat(mf.value); mfOut.textContent = state.sandbox.maturityFloor.toFixed(2); });
     var apply = el('button', { class: 'button primary', type: 'button', text: 'Re-rank the board', onclick: function () { state.sandbox.active = true; render(); } });
-    var reset = el('button', { class: 'button ghost', type: 'button', text: 'Reset to radar-2', onclick: function () { state.sandbox.active = false; state.sandbox.growthWeight = m.growth_weight; state.sandbox.maturityFloor = m.maturity_floor; render(); } });
+    var reset = el('button', { class: 'button ghost', type: 'button', text: 'Reset to radar-3', onclick: function () { state.sandbox.active = false; state.sandbox.growthWeight = m.growth_weight; state.sandbox.maturityFloor = m.maturity_floor; render(); } });
     return el('section', { class: 'panel sandbox' },
       el('h2', { text: 'Model sandbox' }),
       el('p', { class: 'sub', text: 'Change two dials and re-rank the board from the same snapshot figures. The category multiple never moves — it is the market\u2019s own — so this is a stress test of the same model, not a new one.' + (state.sandbox.active ? ' Sandbox is on: the board below is re-ranked.' : '') }),
@@ -391,6 +403,16 @@
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'Launch odds & farm verdict' }),
+      el('div', { class: 'equation' },
+        el('div', null, el('span', { text: 'Launch odds' }), el('b', { class: 'num', text: fmtOdds(row.launch_odds) })),
+        el('div', null, el('span', { text: 'Expected value' }), el('b', { class: 'num', text: fmtUsd(row.expected_value_usd) })),
+        el('div', null, el('span', { text: 'Farm cost' }), el('b', { class: 'num', text: fmtUsd(row.farm_cost_usd) })),
+        el('div', null, el('span', { text: 'Verdict' }), el('b', { class: 'num', text: row.farm_verdict || '' }))
+      ),
+      el('p', { class: 'sub', text: 'Odds are the launch rate of peer protocols like this one — same category, same age with no token — read off the snapshot\u2019s own record. Expected value is implied value times those odds; the verdict weighs it against what farming costs.' })
+    ));
+    dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
       el('ol', { class: 'steps' }, steps.map(function (s) {
         var at = s.indexOf(' Cost: ');
@@ -407,16 +429,58 @@
     }
   }
 
+  function integrityStripSection() {
+    var items = DATA.integrity || [];
+    if (items.length === 0) return null;
+    return el('section', { class: 'panel integrity', 'aria-label': 'Data integrity' },
+      el('h2', { text: 'Integrity strip' }),
+      el('p', { class: 'sub', text: 'What the record survived, checked at run time — never asserted. A warning is shown, not hidden.' }),
+      el('div', { class: 'strip' }, items.map(function (it) {
+        return el('div', { class: 'strip-item ' + it.status },
+          el('span', { class: 'strip-mark', text: it.status === 'pass' ? '✓' : '!' }),
+          el('b', { text: it.label }),
+          el('span', { class: 'sub', text: it.detail })
+        );
+      }))
+    );
+  }
+
+  function fitPanel() {
+    var fit = DATA.fit;
+    if (!fit) return null;
+    return el('section', { class: 'panel fit' },
+      el('h2', { text: 'How the value terms were fitted' }),
+      el('p', { class: 'sub', text: 'Nothing in the value model is hand-set. Every term is fitted from the ' + fit.liveFittable + ' live-token protocols whose market cap is a fact, and tested held out twice: each fold is fitted on one half of the live protocols and scored on the other.' }),
+      el('table', { class: 'mult-table' },
+        el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Fold' }), el('th', { scope: 'col', text: 'Fitted on' }), el('th', { scope: 'col', text: 'Tested on' }), el('th', { scope: 'col', text: 'Held-out error' }), el('th', { scope: 'col', text: 'Hand-set error' }))),
+        el('tbody', null, fit.folds.map(function (f) {
+          return el('tr', null,
+            el('td', { text: f.fold }),
+            el('td', { class: 'num', text: String(f.fitSize) }),
+            el('td', { class: 'num', text: String(f.testSize) }),
+            el('td', { class: 'num', text: String(f.heldOutMedianAbsLogError) }),
+            el('td', { class: 'num', text: String(f.baselineMedianAbsLogError) })
+          );
+        }))
+      ),
+      el('p', { class: 'sub', text: 'Error is the median absolute log error of predicted against actual market cap — lower is better. Full-sample fit ' + fit.fullSampleMedianAbsLogError + ' against the hand-set model\u2019s ' + fit.baselineFullSampleMedianAbsLogError + '. Fitted terms: growth weight ' + fit.finalModel.growth_weight + ', maturity ' + fit.finalModel.maturity_floor + ' + ' + fit.finalModel.maturity_range + ', multiple clamped to [' + fit.finalModel.multiple_floor + ', ' + fit.finalModel.multiple_cap + '].' })
+    );
+  }
+
   function render() {
     app.textContent = '';
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    var strip = integrityStripSection();
+    if (strip) shell.appendChild(strip);
     shell.appendChild(picks());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') {
       shell.appendChild(modelPanel());
+      var fit = fitPanel();
+      if (fit) shell.appendChild(fit);
       shell.appendChild(sandboxPanel());
     }
     shell.appendChild(el('p', { class: 'foot', text: 'Token Radar · ' + DATA.model_version + ' · snapshot ' + DATA.as_of + ' · ' + DATA.source }));
