@@ -12,9 +12,11 @@
 // special-cased: the same function scores every row.
 //
 //   multiple     = the category's own market multiple: the median market-cap / TVL of the live-token
-//                  protocols in that category, computed from this snapshot at run time, clamped to
-//                  [0.05, 1.00]; a category with fewer than 3 live comparables uses the global median
-//                  market-cap / TVL of all live-token protocols instead.
+//                  protocols in that category, shrunk toward the global median with a prior of 3
+//                  (one comparable moves it part-way, never all the way), each live ratio first
+//                  winsorized at the 95th percentile so one 400x outlier cannot set a category;
+//                  a category with no live comparable at all uses the global median instead.
+//                  The multiple is clamped to [multiple_floor, multiple_cap].
 //   base         = tvl_usd x multiple
 //   growth       = clamp(change_7d, -60, 120) per cent
 //   growthMult   = 1 + (growth / 100) x GROWTH_WEIGHT
@@ -66,6 +68,9 @@ export interface ModelConstants {
   unknown_age_days: number;
   multiple_floor: number;
   multiple_cap: number;
+  /** Shrinkage prior for the category multiple: a category's own median counts as this many
+   *  global observations, so one live comparable moves the multiple part-way from the global
+   *  median instead of being ignored (too few samples) or trusted whole (one noisy sample). */
   multiple_min_samples: number;
 }
 
@@ -124,6 +129,13 @@ export interface BoardRow {
   expected_value_usd: number;
   farm_cost_usd: number;
   farm_verdict: string;
+  odds_basis: string;
+  odds_peers: number;
+  odds_launched: number;
+  farm_capital_usd: number;
+  farm_gas_usd: number;
+  farm_ratio: number;
+  farm_reason: string;
 }
 
 /** The dashboard's compact view of one row, farm plan included so the detail view and board.json agree. */
@@ -148,6 +160,13 @@ export interface RadarRow {
   expected_value_usd: number;
   farm_cost_usd: number;
   farm_verdict: string;
+  odds_basis: string;
+  odds_peers: number;
+  odds_launched: number;
+  farm_capital_usd: number;
+  farm_gas_usd: number;
+  farm_ratio: number;
+  farm_reason: string;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -209,6 +228,12 @@ function median(values: number[]): number {
   const s = [...values].sort((a, b) => a - b);
   const mid = Math.floor(s.length / 2);
   return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+
+/** The `q` quantile (0..1) of a sorted list of numbers, nearest-rank. */
+function percentile(sorted: number[], q: number): number {
+  if (sorted.length === 0) return 1;
+  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]!;
 }
 
 /** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad. */
@@ -288,13 +313,19 @@ export function validateSnapshot(snapshot: Snapshot): string[] {
 
 /**
  * The market multiples, computed from the snapshot's own live-token protocols at run time.
- * Each category's multiple is the median market-cap / TVL of its live-token protocols, when at
- * least `multiple_min_samples` of them carry a market cap; otherwise the category falls back to
- * the global median. Both are clamped to [multiple_floor, multiple_cap].
+ * Each category's multiple is its median market-cap / TVL, shrunk toward the global median
+ * with `multiple_min_samples` as the prior strength: (n * category median + k * global) /
+ * (n + k). A category with one live comparable is priced part-way from its own evidence,
+ * never on the global median alone and never on a single sample whole. A category with no
+ * live comparable at all still falls back to the global median. Before any median, each
+ * live ratio is winsorized at the set's own 95th percentile, so one token priced at 400x
+ * its TVL (rain, the only live Prediction Market) cannot set a whole category's multiple
+ * on its own. All multiples are clamped to [multiple_floor, multiple_cap].
  */
 export function computeMultiples(snapshot: Snapshot, model: ModelConstants): {
   byCategory: Map<string, number>;
   global: number;
+  samples: Map<string, number>;
   table: CategoryMultiple[];
 } {
   const byCategory = new Map<string, number[]>();
@@ -312,26 +343,34 @@ export function computeMultiples(snapshot: Snapshot, model: ModelConstants): {
       byCategory.set(p.category, list);
     }
   }
+  const winsor = all.length > 0 ? percentile([...all].sort((a, b) => a - b), 0.95) : 1;
+  const win = (r: number): number => Math.min(r, winsor);
   const clamp = (n: number): number => Math.min(model.multiple_cap, Math.max(model.multiple_floor, n));
-  const global = all.length > 0 ? clamp(median(all)) : 0.25;
+  const global = all.length > 0 ? clamp(median(all.map(win))) : 0.25;
   const multiples = new Map<string, number>();
+  const samples = new Map<string, number>();
   const table: CategoryMultiple[] = [];
+  const k = model.multiple_min_samples;
   for (const [category, values] of [...byCategory.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    if (values.length >= model.multiple_min_samples) {
-      multiples.set(category, clamp(median(values)));
-      table.push({ category, multiple: clamp(median(values)), samples: values.length, source: 'category' });
-    }
+    const shrunk = (values.length * median(values.map(win)) + k * global) / (values.length + k);
+    multiples.set(category, clamp(shrunk));
+    samples.set(category, values.length);
+    table.push({ category, multiple: clamp(shrunk), samples: values.length, source: 'category' });
   }
-  return { byCategory: multiples, global, table };
+  return { byCategory: multiples, global, samples, table };
 }
 
 /** The category multiple one protocol is scored at, and where it came from. */
 export function multipleFor(
   p: SnapshotProtocol,
-  multiples: { byCategory: Map<string, number>; global: number },
+  multiples: { byCategory: Map<string, number>; global: number; samples: Map<string, number> },
 ): { multiple: number; source: string } {
   if (p.category !== null && multiples.byCategory.has(p.category)) {
-    return { multiple: multiples.byCategory.get(p.category)!, source: `median of ${p.category} live tokens` };
+    const n = multiples.samples.get(p.category) ?? 0;
+    return {
+      multiple: multiples.byCategory.get(p.category)!,
+      source: `median of ${n} ${p.category} live token${n === 1 ? '' : 's'}, shrunk to global`,
+    };
   }
   return { multiple: multiples.global, source: 'global median of live tokens' };
 }
@@ -413,6 +452,13 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     expected_value_usd: s.odds.expected,
     farm_cost_usd: s.verdict.costUsd,
     farm_verdict: s.verdict.verdict,
+    odds_basis: s.odds.basis,
+    odds_peers: s.odds.peers,
+    odds_launched: s.odds.launched,
+    farm_capital_usd: s.verdict.capitalUsd,
+    farm_gas_usd: s.verdict.gasUsd,
+    farm_ratio: s.verdict.ratio,
+    farm_reason: s.verdict.reason,
   }));
 }
 
@@ -634,6 +680,13 @@ export function radarRow(row: BoardRow): RadarRow {
     expected_value_usd: row.expected_value_usd,
     farm_cost_usd: row.farm_cost_usd,
     farm_verdict: row.farm_verdict,
+    odds_basis: row.odds_basis,
+    odds_peers: row.odds_peers,
+    odds_launched: row.odds_launched,
+    farm_capital_usd: row.farm_capital_usd,
+    farm_gas_usd: row.farm_gas_usd,
+    farm_ratio: row.farm_ratio,
+    farm_reason: row.farm_reason,
   };
 }
 
@@ -663,10 +716,11 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
 }
 
 /**
- * The radar-3 build: the value terms are fitted from the snapshot's live-token
- * protocols and tested held-out twice, the board carries launch odds and costed farm
- * verdicts, and the dashboard carries the fit report and the integrity strip. The
- * hand-set radar-2 build above stays untouched as the fit's own baseline.
+ * The radar-4 build: the value terms are fitted from the snapshot's live-token
+ * protocols and tested held-out twice, in two independent designs (a hash split both ways
+ * and a time split), the board carries launch odds with their peer evidence and costed farm
+ * verdicts with their breakdown, and the dashboard carries the fit report and the
+ * integrity strip. The hand-set radar-2 build above stays untouched as the fit's own baseline.
  */
 export function buildRadarFitted(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
   const fitted = fitModel(snapshot);

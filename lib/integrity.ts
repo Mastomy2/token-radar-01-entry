@@ -40,6 +40,8 @@ export function integrityStrip(
   const ageDays = Number.isFinite(asOf)
     ? Math.max(0, Math.floor((Date.now() - asOf) / 86_400_000))
     : -1;
+  const unknownGrowth = board.filter((r) => r.change_7d === null).length;
+  const globalOdds = board.filter((r) => r.odds_basis.includes('too small')).length;
   const watchRows = board.filter((r) => snapshot.watchlist.includes(r.slug));
   const watchMinTvl = watchRows.reduce(
     (m, r) => Math.min(m, r.tvl_usd),
@@ -76,6 +78,22 @@ export function integrityStrip(
         globalMultiple === 0
           ? 'every row priced at its own category multiple'
           : `${globalMultiple} of ${board.length} rows fall back to the global median`,
+    },
+    {
+      label: 'Growth known',
+      status: unknownGrowth === 0 ? 'pass' : 'warn',
+      detail:
+        unknownGrowth === 0
+          ? 'every row reports its 7-day growth'
+          : `${unknownGrowth} of ${board.length} rows report no 7-day growth; the model treats it as 0`,
+    },
+    {
+      label: 'Odds from peers',
+      status: globalOdds === 0 ? 'pass' : 'warn',
+      detail:
+        globalOdds === 0
+          ? 'every row\u2019s launch odds rest on its own peer group'
+          : `${globalOdds} of ${board.length} rows fall back to the global launch rate; their peer group was too small`,
     },
     {
       label: 'Snapshot fresh',
