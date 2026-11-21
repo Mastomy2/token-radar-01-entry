@@ -1,4 +1,4 @@
-// Token Radar, radar-2 dashboard. It reads window.RADAR (written beside dashboard/ by main.ts) and
+// Token Radar, radar-4 dashboard. It reads window.RADAR (written beside dashboard/ by main.ts) and
 // renders the ranked board, a filterable table, a per-protocol detail drawer with the model's own
 // inputs and the protocol's farm plan, a live-token view set apart, and a model sandbox that
 // re-ranks the board from the same snapshot figures. No network: every byte it shows is in data.js.
@@ -174,6 +174,19 @@
     );
   }
 
+  function evidenceBar() {
+    var m = DATA.model;
+    var fit = DATA.fit;
+    var shortNames = ['hash A→B', 'hash B→A', 'time older→newer'];
+    var held = fit ? fit.folds.map(function (f, i) {
+      return (shortNames[i] || f.fold) + ' ' + f.heldOutMedianAbsLogError + ' vs ' + f.baselineMedianAbsLogError;
+    }).join(' · ') : 'n/a';
+    return el('section', { class: 'panel evidence', 'aria-label': 'Model evidence' },
+      el('p', null, el('b', { text: 'Model ' + DATA.model_version + ' — fitted, not hand-set. ' }), 'Growth ' + m.growth_weight + ', maturity ' + m.maturity_floor + ' + ' + m.maturity_range + ', multiples shrunk to the global ' + fmtMult(DATA.global_multiple) + ' (prior ' + m.multiple_min_samples + ', winsorized at p95). ' + DATA.board_size + ' rows, watchlist ' + DATA.watchlist_size + '/' + DATA.watchlist_size + '.'),
+      fit ? el('p', null, el('b', { text: 'Held-out error, fitted vs hand-set: ' }), held + '. Full sample ' + fit.fullSampleMedianAbsLogError + ' vs ' + fit.baselineFullSampleMedianAbsLogError + '.') : null
+    );
+  }
+
   function pickReason(r) {
     var parts = [];
     parts.push(fmtUsd(r.tvl_usd) + ' TVL');
@@ -184,7 +197,7 @@
   }
 
   function picks() {
-    var top = effectiveRows().slice(0, 5);
+    var top = rows().slice(0, 5);
     return el('section', { class: 'picks', 'aria-label': 'Radar picks' },
       top.map(function (r) {
         return el('button', { type: 'button', class: 'pick', onclick: function () { openDetail(r.slug); } },
@@ -333,7 +346,7 @@
       el('div', { class: 'formula' },
         'implied = round( tvl_usd x category multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
       ),
-      el('p', { class: 'sub', text: 'The category multiple is the market\u2019s own pricing: the median market-cap / TVL of the live-token protocols in that category, computed from this snapshot at run time and clamped to [' + m.multiple_floor + ', ' + m.multiple_cap + ']. A category with fewer than ' + m.multiple_min_samples + ' live comparables uses the global median, ' + fmtMult(DATA.global_multiple) + '. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Wrapped, staked and bridged products never rank: they are a token that already trades, not a launch waiting to happen.' }),
+      el('p', { class: 'sub', text: 'The category multiple is the market\u2019s own pricing: the median market-cap / TVL of the live-token protocols in that category, shrunk toward the global median ' + fmtMult(DATA.global_multiple) + ' with a prior of ' + m.multiple_min_samples + ' — one comparable moves it part-way, never all the way. Each live ratio is first winsorized at the 95th percentile, so one token priced at 400x its TVL cannot set a whole category. A category with no live comparable at all uses the global median. Every multiple is clamped to [' + m.multiple_floor + ', ' + m.multiple_cap + ']. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Wrapped, staked and bridged products never rank: they are a token that already trades, not a launch waiting to happen.' }),
       el('table', { class: 'mult-table' },
         el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Live protocols' }), el('th', { scope: 'col', text: 'Median mcap / TVL' }))),
         el('tbody', null, multRows.map(function (mm) {
@@ -344,7 +357,7 @@
           );
         }))
       ),
-      el('p', { class: 'sub', text: 'Categories not listed above use the global median ' + fmtMult(DATA.global_multiple) + ' — too few live tokens in that category to price it on its own.' })
+      el('p', { class: 'sub', text: 'Categories not listed above use the global median ' + fmtMult(DATA.global_multiple) + ' — no live token in that category to price it on.' })
     );
   }
 
@@ -357,7 +370,7 @@
     var mfOut = el('output', { text: String(state.sandbox.maturityFloor.toFixed(2)) });
     mf.addEventListener('input', function () { state.sandbox.maturityFloor = parseFloat(mf.value); mfOut.textContent = state.sandbox.maturityFloor.toFixed(2); });
     var apply = el('button', { class: 'button primary', type: 'button', text: 'Re-rank the board', onclick: function () { state.sandbox.active = true; render(); } });
-    var reset = el('button', { class: 'button ghost', type: 'button', text: 'Reset to radar-3', onclick: function () { state.sandbox.active = false; state.sandbox.growthWeight = m.growth_weight; state.sandbox.maturityFloor = m.maturity_floor; render(); } });
+    var reset = el('button', { class: 'button ghost', type: 'button', text: 'Reset to radar-4', onclick: function () { state.sandbox.active = false; state.sandbox.growthWeight = m.growth_weight; state.sandbox.maturityFloor = m.maturity_floor; render(); } });
     return el('section', { class: 'panel sandbox' },
       el('h2', { text: 'Model sandbox' }),
       el('p', { class: 'sub', text: 'Change two dials and re-rank the board from the same snapshot figures. The category multiple never moves — it is the market\u2019s own — so this is a stress test of the same model, not a new one.' + (state.sandbox.active ? ' Sandbox is on: the board below is re-ranked.' : '') }),
@@ -388,6 +401,10 @@
       ),
       el('button', { class: 'close', type: 'button', 'aria-label': 'Close details', text: 'Close', onclick: function () { dialog.close(); } })
     ));
+    var flags = [];
+    if (row.age_days === null || row.age_days === undefined) flags.push('Age unknown — maturity uses the ' + DATA.model.unknown_age_days + '-day default.');
+    if (row.change_7d === null || row.change_7d === undefined) flags.push('7-day growth unreported — growth treated as 0.');
+    if (row.multiple_source === 'global median of live tokens') flags.push('No live comparable in this category — priced at the global median.');
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'equation' },
@@ -400,7 +417,8 @@
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' }),
+      flags.length ? el('p', { class: 'sub', text: 'Data flags: ' + flags.join(' ') }) : null
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Launch odds & farm verdict' }),
@@ -410,7 +428,8 @@
         el('div', null, el('span', { text: 'Farm cost' }), el('b', { class: 'num', text: fmtUsd(row.farm_cost_usd) })),
         el('div', null, el('span', { text: 'Verdict' }), el('b', { class: 'num', text: row.farm_verdict || '' }))
       ),
-      el('p', { class: 'sub', text: 'Odds are the launch rate of peer protocols like this one — same category, same age with no token — read off the snapshot\u2019s own record. Expected value is implied value times those odds; the verdict weighs it against what farming costs.' })
+      el('p', { class: 'sub', text: 'Odds are the launch rate of peer protocols like this one — same category, same age with no token — read off the snapshot\u2019s own record. ' + (row.odds_basis || '') + '. Expected value is implied value times those odds.' }),
+      el('p', { class: 'sub', text: 'Farm cost ' + fmtUsd(row.farm_cost_usd) + ' = ' + fmtUsd(row.farm_capital_usd) + ' capital + ' + fmtUsd(row.farm_gas_usd) + ' gas (5 transactions on ' + (row.chains && row.chains.length ? row.chains[0] : 'its main chain') + '). ' + (row.farm_reason || '') })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
@@ -448,9 +467,11 @@
   function fitPanel() {
     var fit = DATA.fit;
     if (!fit) return null;
+    var wins = fit.folds.filter(function (f) { return f.heldOutMedianAbsLogError < f.baselineMedianAbsLogError; }).length;
+    var held = fit.folds.map(function (f) { return f.fold + ': fitted ' + f.heldOutMedianAbsLogError + ' vs hand-set ' + f.baselineMedianAbsLogError; }).join('; ');
     return el('section', { class: 'panel fit' },
       el('h2', { text: 'How the value terms were fitted' }),
-      el('p', { class: 'sub', text: 'Nothing in the value model is hand-set. Every term is fitted from the ' + fit.liveFittable + ' live-token protocols whose market cap is a fact, and tested held out twice: each fold is fitted on one half of the live protocols and scored on the other.' }),
+      el('p', { class: 'sub', text: 'Nothing in the value model is hand-set. Every term is fitted from the ' + fit.liveFittable + ' live-token protocols whose market cap is a fact, and tested held out twice, in two independent designs: each hash-split fold picks its winner on an inner split of its own fit half and is scored once on the half it never met, and the time split fits older protocols and tests newer ones.' }),
       el('table', { class: 'mult-table' },
         el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Fold' }), el('th', { scope: 'col', text: 'Fitted on' }), el('th', { scope: 'col', text: 'Tested on' }), el('th', { scope: 'col', text: 'Held-out error' }), el('th', { scope: 'col', text: 'Hand-set error' }))),
         el('tbody', null, fit.folds.map(function (f) {
@@ -463,7 +484,7 @@
           );
         }))
       ),
-      el('p', { class: 'sub', text: 'Error is the median absolute log error of predicted against actual market cap — lower is better. Full-sample fit ' + fit.fullSampleMedianAbsLogError + ' against the hand-set model\u2019s ' + fit.baselineFullSampleMedianAbsLogError + '. Fitted terms: growth weight ' + fit.finalModel.growth_weight + ', maturity ' + fit.finalModel.maturity_floor + ' + ' + fit.finalModel.maturity_range + ', multiple clamped to [' + fit.finalModel.multiple_floor + ', ' + fit.finalModel.multiple_cap + '].' })
+      el('p', { class: 'sub', text: 'Error is the median absolute log error of predicted against actual market cap — lower is better. Held out, the fitted terms beat the hand-set model on ' + wins + ' of ' + fit.folds.length + ' folds (' + held + '), and on the full sample (' + fit.fullSampleMedianAbsLogError + ' vs ' + fit.baselineFullSampleMedianAbsLogError + '). The edge is small, and a typical prediction still misses by a factor of about e to that error — so the panel reports the miss, not just the win. Fitted terms: growth weight ' + fit.finalModel.growth_weight + ', maturity ' + fit.finalModel.maturity_floor + ' + ' + fit.finalModel.maturity_range + ', multiple clamped to [' + fit.finalModel.multiple_floor + ', ' + fit.finalModel.multiple_cap + '].' })
     );
   }
 
@@ -472,6 +493,7 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    shell.appendChild(evidenceBar());
     var strip = integrityStripSection();
     if (strip) shell.appendChild(strip);
     shell.appendChild(picks());
