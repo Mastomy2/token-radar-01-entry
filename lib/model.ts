@@ -25,6 +25,13 @@
 // a DEX is worth what live DEXes trade at per dollar of TVL, a lender what live lenders trade at, and
 // so on. The dashboard states the multiples table and how many live protocols each one rests on.
 
+import { fitModel, MODEL_VERSION_FITTED } from './fit.ts';
+import type { FitReport } from './fit.ts';
+import { buildOddsTable, oddsFor } from './odds.ts';
+import { farmVerdict } from './verdict.ts';
+import { integrityStrip } from './integrity.ts';
+import type { IntegrityItem } from './integrity.ts';
+
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
   slug: string;
@@ -113,6 +120,10 @@ export interface BoardRow {
     age_days: number | null;
   };
   farm_steps: string[];
+  launch_odds: number;
+  expected_value_usd: number;
+  farm_cost_usd: number;
+  farm_verdict: string;
 }
 
 /** The dashboard's compact view of one row, farm plan included so the detail view and board.json agree. */
@@ -133,6 +144,10 @@ export interface RadarRow {
   growth_multiplier: number;
   maturity_multiplier: number;
   farm_steps: string[];
+  launch_odds: number;
+  expected_value_usd: number;
+  farm_cost_usd: number;
+  farm_verdict: string;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -170,6 +185,8 @@ export interface RadarData {
   watchlist: string[];
   rows: RadarRow[];
   live: LiveRow[];
+  fit?: FitReport;
+  integrity?: IntegrityItem[];
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -359,10 +376,13 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     if (!chosen.has(p.slug) && isRankable(p)) chosen.set(p.slug, p);
   }
 
+  const oddsTable = buildOddsTable(snapshot);
   const scored = [...chosen.values()].map((p) => {
     const { multiple, source } = multipleFor(p, multiples);
     const { implied, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model, multiple);
-    return { p, implied, growthPct, growthMult, maturityMult, age, multiple, source };
+    const odds = oddsFor(oddsTable, p, age, implied);
+    const verdict = farmVerdict({ implied, odds: odds.odds, tvlUsd: p.tvl_usd, chains: p.chains });
+    return { p, implied, growthPct, growthMult, maturityMult, age, multiple, source, odds, verdict };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -389,6 +409,10 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       age_days: s.age,
     },
     farm_steps: farmSteps(s.p, s.age).map(stepText),
+    launch_odds: s.odds.odds,
+    expected_value_usd: s.odds.expected,
+    farm_cost_usd: s.verdict.costUsd,
+    farm_verdict: s.verdict.verdict,
   }));
 }
 
@@ -606,6 +630,10 @@ export function radarRow(row: BoardRow): RadarRow {
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     farm_steps: row.farm_steps,
+    launch_odds: row.launch_odds,
+    expected_value_usd: row.expected_value_usd,
+    farm_cost_usd: row.farm_cost_usd,
+    farm_verdict: row.farm_verdict,
   };
 }
 
@@ -632,6 +660,27 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live,
   };
   return { board, radar };
+}
+
+/**
+ * The radar-3 build: the value terms are fitted from the snapshot's live-token
+ * protocols and tested held-out twice, the board carries launch odds and costed farm
+ * verdicts, and the dashboard carries the fit report and the integrity strip. The
+ * hand-set radar-2 build above stays untouched as the fit's own baseline.
+ */
+export function buildRadarFitted(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
+  const fitted = fitModel(snapshot);
+  const { board, radar } = buildRadar(snapshot, fitted.model);
+  const warnings = validateSnapshot(snapshot);
+  return {
+    board,
+    radar: {
+      ...radar,
+      model_version: MODEL_VERSION_FITTED,
+      fit: fitted.report,
+      integrity: integrityStrip(snapshot, board, warnings),
+    },
+  };
 }
 
 /** The snapshot out of a file's text, refused unless it is the shape the model scores. */
