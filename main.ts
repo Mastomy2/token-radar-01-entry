@@ -1,15 +1,18 @@
 // A working token-radar-01 entry (Node 22, standard library only).
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
-// clean pre-token protocol with the radar-2 model in lib/model.ts, writes the ranked board to
+// clean pre-token protocol with the radar-4 fitted model in lib/model.ts (terms fitted in lib/fit.ts
+// and tested held-out twice, in two independent designs), writes the ranked board to
 // /output/board.json, and copies this repository's dashboard/ and screenshots/ to /output. Last, it
 // writes /output/dossier.json, the summary the judge reads, with the vendored make.fun library.
 //
-// radar-2 differs from the house starter in three ways the dashboard states: the board carries only
+// radar-4 differs from the house starter in four ways the dashboard states: the board carries only
 // clean pre-token protocols (a wrapped, staked or bridged product of a token that already trades never
-// ranks), each category is scored at its own market multiple, the median market-cap / TVL of that
-// category's live-token protocols computed from the snapshot at run time, and every farm plan is seven
-// steps with chain-aware gas. The dashboard is a static page, no framework and no network:
+// ranks), each category is scored at its own market multiple — the median market-cap / TVL of that
+// category's live-token protocols, shrunk toward the global median and winsorized at the 95th
+// percentile, computed from the snapshot at run time — every row carries launch odds from its peers'
+// record and a costed farm verdict, and every farm plan is seven steps with chain-aware gas. The
+// dashboard is a static page, no framework and no network:
 // dashboard/index.html, dashboard/app.css and dashboard/app.js read /output/data.js, which this
 // program writes from the same board.
 //
@@ -149,7 +152,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: radar-3 fit on ${radar.fit?.liveFittable ?? 0} live protocols: held-out median log error ${radar.fit?.folds.map((f) => f.heldOutMedianAbsLogError).join(' / ') ?? 'n/a'} vs radar-2 baseline ${radar.fit?.folds.map((f) => f.baselineMedianAbsLogError).join(' / ') ?? 'n/a'}\n` +
+    `token radar: radar-4 fit on ${radar.fit?.liveFittable ?? 0} live protocols: held-out median log error ${radar.fit?.folds.map((f) => f.heldOutMedianAbsLogError).join(' / ') ?? 'n/a'} vs radar-2 baseline ${radar.fit?.folds.map((f) => f.baselineMedianAbsLogError).join(' / ') ?? 'n/a'}\n` +
     `token radar: strict audit passed: ${board.length} rows, positive implied values, no duplicate symbols\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
