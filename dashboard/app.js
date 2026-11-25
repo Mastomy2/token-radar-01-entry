@@ -1,4 +1,4 @@
-// Token Radar, radar-4 dashboard. It reads window.RADAR (written beside dashboard/ by main.ts) and
+// Token Radar, radar-5 dashboard. It reads window.RADAR (written beside dashboard/ by main.ts) and
 // renders the ranked board, a filterable table, a per-protocol detail drawer with the model's own
 // inputs and the protocol's farm plan, a live-token view set apart, and a model sandbox that
 // re-ranks the board from the same snapshot figures. No network: every byte it shows is in data.js.
@@ -11,7 +11,7 @@
   var state = {
     q: '', category: 'all', chain: 'all', watchlistOnly: false, tab: 'pre-token',
     sort: 'implied', dir: -1, selected: null,
-    sandbox: { active: false, growthWeight: DATA.model.growth_weight, maturityFloor: DATA.model.maturity_floor },
+    sandbox: { active: false, slope: DATA.model.slope, intercept: DATA.model.intercept },
   };
   var watchSlugs = {};
   (DATA.watchlist || []).forEach(function (s) { watchSlugs[s] = true; });
@@ -41,20 +41,16 @@
 
   // The model in one function: the page recomputes a row from the snapshot figures and checks the
   // number board.json carries, so the page's code and the board's data are visibly the same arithmetic.
-  // The sandbox changes only the growth weight and the maturity floor; the category multiple stays the
-  // market's own, so a re-rank is a stress test of the same model, not a new one.
+  // The sandbox changes only the power law's slope and intercept; the fit stays the market's own,
+  // so a re-rank is a stress test of the same model, not a new one.
   function impliedOf(row, model) {
-    var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
-    var growthMult = 1 + (growth / 100) * model.growth_weight;
-    var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
-    var maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-    return Math.max(1, Math.round(row.tvl_usd * row.category_multiple * growthMult * maturity));
+    return Math.max(1, Math.round(Math.exp(model.intercept + model.slope * Math.log(Math.max(1, row.tvl_usd)))));
   }
   function sandboxModel() {
     var m = {};
     Object.keys(DATA.model).forEach(function (k) { m[k] = DATA.model[k]; });
-    m.growth_weight = state.sandbox.growthWeight;
-    m.maturity_floor = state.sandbox.maturityFloor;
+    m.slope = state.sandbox.slope;
+    m.intercept = state.sandbox.intercept;
     return m;
   }
 
@@ -136,7 +132,7 @@
       else if (key === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; }
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
-      else if (key === 'multiple') { av = a.category_multiple; bv = b.category_multiple; }
+      else if (key === 'multiple') { av = a.implied_value_usd / Math.max(1, a.tvl_usd); bv = b.implied_value_usd / Math.max(1, b.tvl_usd); }
       else if (key === 'expected') { av = a.expected_value_usd; bv = b.expected_value_usd; }
       else if (key === 'odds') { av = a.launch_odds; bv = b.launch_odds; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
@@ -182,8 +178,8 @@
       return (shortNames[i] || f.fold) + ' ' + f.heldOutMedianAbsLogError + ' vs ' + f.baselineMedianAbsLogError;
     }).join(' · ') : 'n/a';
     return el('section', { class: 'panel evidence', 'aria-label': 'Model evidence' },
-      el('p', null, el('b', { text: 'Model ' + DATA.model_version + ' — fitted, not hand-set. ' }), 'Growth ' + m.growth_weight + ', maturity ' + m.maturity_floor + ' + ' + m.maturity_range + ', multiples shrunk to the global ' + fmtMult(DATA.global_multiple) + ' (prior ' + m.multiple_min_samples + ', winsorized at p95). ' + DATA.board_size + ' rows, watchlist ' + DATA.watchlist_size + '/' + DATA.watchlist_size + '.'),
-      fit ? el('p', null, el('b', { text: 'Held-out error, fitted vs hand-set: ' }), held + '. Full sample ' + fit.fullSampleMedianAbsLogError + ' vs ' + fit.baselineFullSampleMedianAbsLogError + '.') : null
+      el('p', null, el('b', { text: 'Model ' + DATA.model_version + ' — fitted, not hand-set. ' }), 'log(market cap) = ' + m.intercept.toFixed(3) + ' + ' + m.slope.toFixed(3) + ' x log(TVL), fitted on ' + (fit ? fit.liveFittable : 'the') + ' live-token protocols. ' + DATA.board_size + ' rows, watchlist ' + DATA.watchlist_size + '/' + DATA.watchlist_size + '.'),
+      fit ? el('p', null, el('b', { text: 'Held-out error, radar-5 vs radar-4: ' }), held + '. Full sample ' + fit.fullSampleMedianAbsLogError + ' vs ' + fit.baselineFullSampleMedianAbsLogError + ' (the old model fits the training data better and generalizes worse).') : null
     );
   }
 
@@ -279,7 +275,7 @@
         el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
         el('td', { class: 'num ' + growthClass, text: growth }),
         el('td', { class: 'num', text: fmtAge(r.age_days) }),
-        el('td', { class: 'num', text: fmtMult(r.category_multiple) }),
+        el('td', { class: 'num', text: fmtMult(r.implied_value_usd / Math.max(1, r.tvl_usd)) }),
         el('td', null, el('div', { class: 'implied' },
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
@@ -301,7 +297,7 @@
             sortHeader('tvl', 'TVL'),
             sortHeader('growth', '7d'),
             sortHeader('age', 'Age'),
-            sortHeader('multiple', 'Multiple'),
+            sortHeader('multiple', 'Value / TVL'),
             sortHeader('implied', 'Implied value'),
             sortHeader('odds', 'Launch odds'),
             sortHeader('expected', 'Expected value'),
@@ -329,7 +325,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking — and their market-cap / TVL ratios are what price the pre-token board.' }),
+          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking — and their market caps are the ground truth the value model is fitted on.' }),
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Token' }))),
           tbody
         )
@@ -339,44 +335,33 @@
 
   function modelPanel() {
     var m = DATA.model;
-    var multRows = DATA.multiples.slice().sort(function (a, b) { return b.multiple - a.multiple; });
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x category multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
+        'implied = round( exp( ' + m.intercept.toFixed(3) + ' + ' + m.slope.toFixed(3) + ' x ln(tvl_usd) ) )'
       ),
-      el('p', { class: 'sub', text: 'The category multiple is the market\u2019s own pricing: the median market-cap / TVL of the live-token protocols in that category, shrunk toward the global median ' + fmtMult(DATA.global_multiple) + ' with a prior of ' + m.multiple_min_samples + ' — one comparable moves it part-way, never all the way. Each live ratio is first winsorized at the 95th percentile, so one token priced at 400x its TVL cannot set a whole category. A category with no live comparable at all uses the global median. Every multiple is clamped to [' + m.multiple_floor + ', ' + m.multiple_cap + ']. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Wrapped, staked and bridged products never rank: they are a token that already trades, not a launch waiting to happen.' }),
-      el('table', { class: 'mult-table' },
-        el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Live protocols' }), el('th', { scope: 'col', text: 'Median mcap / TVL' }))),
-        el('tbody', null, multRows.map(function (mm) {
-          return el('tr', null,
-            el('td', { text: mm.category }),
-            el('td', { class: 'num', text: String(mm.samples) }),
-            el('td', { class: 'num', text: fmtMult(mm.multiple) })
-          );
-        }))
-      ),
-      el('p', { class: 'sub', text: 'Categories not listed above use the global median ' + fmtMult(DATA.global_multiple) + ' — no live token in that category to price it on.' })
+      el('p', { class: 'sub', text: 'One power law, fitted on the snapshot\u2019s own live-token protocols: market cap grows with the square root of TVL (slope ' + m.slope.toFixed(2) + '), not linearly — so the old multiples model, implied = TVL x category multiple, systematically overpriced the biggest protocols and underpriced the small ones. The slope and intercept are the ridge fit on all ' + (DATA.fit ? DATA.fit.liveFittable : '') + ' live-token protocols; the ridge penalty is ' + m.lambda + ', picked on an inner split. Growth and age terms were tried on the same blind folds and dropped: they raised held-out error, so the value uses TVL alone. For market context, live tokens trade at a median ' + fmtMult(DATA.global_multiple) + ' of TVL. Wrapped, staked and bridged products never rank: they are a token that already trades, not a launch waiting to happen.' }),
+      DATA.oddsFit ? el('p', { class: 'sub', text: 'Launch odds are a forward 12-month chance from a Weibull launch clock fitted on the same record — not a peer-group rate. Held out, the clock beats the peer table on Brier score (' + DATA.oddsFit.weibullMean + ' vs ' + DATA.oddsFit.peerMean + ', lower is better).' }) : null
     );
   }
 
   function sandboxPanel() {
     var m = DATA.model;
-    var gw = el('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(state.sandbox.growthWeight), 'aria-label': 'Growth weight' });
-    var gwOut = el('output', { text: String(state.sandbox.growthWeight.toFixed(2)) });
-    gw.addEventListener('input', function () { state.sandbox.growthWeight = parseFloat(gw.value); gwOut.textContent = state.sandbox.growthWeight.toFixed(2); });
-    var mf = el('input', { type: 'range', min: '0.4', max: '0.8', step: '0.05', value: String(state.sandbox.maturityFloor), 'aria-label': 'Maturity floor' });
-    var mfOut = el('output', { text: String(state.sandbox.maturityFloor.toFixed(2)) });
-    mf.addEventListener('input', function () { state.sandbox.maturityFloor = parseFloat(mf.value); mfOut.textContent = state.sandbox.maturityFloor.toFixed(2); });
+    var sl = el('input', { type: 'range', min: '0.3', max: '0.8', step: '0.01', value: String(state.sandbox.slope), 'aria-label': 'Power-law slope' });
+    var slOut = el('output', { text: String(state.sandbox.slope.toFixed(2)) });
+    sl.addEventListener('input', function () { state.sandbox.slope = parseFloat(sl.value); slOut.textContent = state.sandbox.slope.toFixed(2); });
+    var ic = el('input', { type: 'range', min: '5', max: '9', step: '0.1', value: String(state.sandbox.intercept), 'aria-label': 'Power-law intercept' });
+    var icOut = el('output', { text: String(state.sandbox.intercept.toFixed(1)) });
+    ic.addEventListener('input', function () { state.sandbox.intercept = parseFloat(ic.value); icOut.textContent = state.sandbox.intercept.toFixed(1); });
     var apply = el('button', { class: 'button primary', type: 'button', text: 'Re-rank the board', onclick: function () { state.sandbox.active = true; render(); } });
-    var reset = el('button', { class: 'button ghost', type: 'button', text: 'Reset to radar-4', onclick: function () { state.sandbox.active = false; state.sandbox.growthWeight = m.growth_weight; state.sandbox.maturityFloor = m.maturity_floor; render(); } });
+    var reset = el('button', { class: 'button ghost', type: 'button', text: 'Reset to radar-5', onclick: function () { state.sandbox.active = false; state.sandbox.slope = m.slope; state.sandbox.intercept = m.intercept; render(); } });
     return el('section', { class: 'panel sandbox' },
       el('h2', { text: 'Model sandbox' }),
-      el('p', { class: 'sub', text: 'Change two dials and re-rank the board from the same snapshot figures. The category multiple never moves — it is the market\u2019s own — so this is a stress test of the same model, not a new one.' + (state.sandbox.active ? ' Sandbox is on: the board below is re-ranked.' : '') }),
+      el('p', { class: 'sub', text: 'Change two dials and re-rank the board from the same snapshot figures. The power law stays the market\u2019s own fit — so this is a stress test of the same model, not a new one.' + (state.sandbox.active ? ' Sandbox is on: the board below is re-ranked.' : '') }),
       el('div', { class: 'sandbox-row' },
-        el('div', { class: 'sandbox-field' }, el('label', { text: 'Growth weight (default ' + m.growth_weight + ')' }), gw, gwOut),
-        el('div', { class: 'sandbox-field' }, el('label', { text: 'Maturity floor (default ' + m.maturity_floor + ')' }), mf, mfOut),
+        el('div', { class: 'sandbox-field' }, el('label', { text: 'Slope (default ' + m.slope.toFixed(2) + ')' }), sl, slOut),
+        el('div', { class: 'sandbox-field' }, el('label', { text: 'Intercept (default ' + m.intercept.toFixed(1) + ')' }), ic, icOut),
         apply, reset
       )
     );
@@ -402,19 +387,18 @@
       el('button', { class: 'close', type: 'button', 'aria-label': 'Close details', text: 'Close', onclick: function () { dialog.close(); } })
     ));
     var flags = [];
-    if (row.age_days === null || row.age_days === undefined) flags.push('Age unknown — maturity uses the ' + DATA.model.unknown_age_days + '-day default.');
-    if (row.change_7d === null || row.change_7d === undefined) flags.push('7-day growth unreported — growth treated as 0.');
-    if (row.multiple_source === 'global median of live tokens') flags.push('No live comparable in this category — priced at the global median.');
+    if (row.age_days === null || row.age_days === undefined) flags.push('Age unknown — shown for context; the value model uses TVL alone.');
+    if (row.change_7d === null || row.change_7d === undefined) flags.push('7-day growth unreported — shown as n/a; the value model uses TVL alone.');
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
-        el('div', null, el('span', { text: 'Category multiple' }), el('b', { class: 'num', text: fmtMult(row.category_multiple) })),
-        el('div', null, el('span', { text: 'Multiple source' }), el('b', { class: 'num', text: row.multiple_source })),
+        el('div', null, el('span', { text: 'log(TVL)' }), el('b', { class: 'num', text: String(row.log_tvl) })),
+        el('div', null, el('span', { text: 'Fitted intercept' }), el('b', { class: 'num', text: String(row.intercept) })),
+        el('div', null, el('span', { text: 'Fitted slope' }), el('b', { class: 'num', text: String(row.slope) })),
+        el('div', null, el('span', { text: 'Predicted log mcap' }), el('b', { class: 'num', text: String(row.predicted_log_mcap) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
-        el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
-        el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' }),
@@ -428,7 +412,7 @@
         el('div', null, el('span', { text: 'Farm cost' }), el('b', { class: 'num', text: fmtUsd(row.farm_cost_usd) })),
         el('div', null, el('span', { text: 'Verdict' }), el('b', { class: 'num', text: row.farm_verdict || '' }))
       ),
-      el('p', { class: 'sub', text: 'Odds are the launch rate of peer protocols like this one — same category, same age with no token — read off the snapshot\u2019s own record. ' + (row.odds_basis || '') + '. Expected value is implied value times those odds.' }),
+      el('p', { class: 'sub', text: 'Odds are the forward 12-month launch chance from a Weibull launch clock fitted on the snapshot\u2019s own record: of protocols that survived this long with no token, this share launch in the next year. ' + (row.odds_basis || '') + '. Expected value is implied value times those odds.' }),
       el('p', { class: 'sub', text: 'Farm cost ' + fmtUsd(row.farm_cost_usd) + ' = ' + fmtUsd(row.farm_capital_usd) + ' capital + ' + fmtUsd(row.farm_gas_usd) + ' gas (5 transactions on ' + (row.chains && row.chains.length ? row.chains[0] : 'its main chain') + '). ' + (row.farm_reason || '') })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
@@ -484,7 +468,7 @@
           );
         }))
       ),
-      el('p', { class: 'sub', text: 'Error is the median absolute log error of predicted against actual market cap — lower is better. Held out, the fitted terms beat the hand-set model on ' + wins + ' of ' + fit.folds.length + ' folds (' + held + '), and on the full sample (' + fit.fullSampleMedianAbsLogError + ' vs ' + fit.baselineFullSampleMedianAbsLogError + '). The edge is small, and a typical prediction still misses by a factor of about e to that error — so the panel reports the miss, not just the win. Fitted terms: growth weight ' + fit.finalModel.growth_weight + ', maturity ' + fit.finalModel.maturity_floor + ' + ' + fit.finalModel.maturity_range + ', multiple clamped to [' + fit.finalModel.multiple_floor + ', ' + fit.finalModel.multiple_cap + '].' })
+      el('p', { class: 'sub', text: 'Error is the median absolute log error of predicted against actual market cap — lower is better. Held out, the fitted power law beats the radar-4 model on ' + wins + ' of ' + fit.folds.length + ' folds (' + held + '). On the full sample it is worse (' + fit.fullSampleMedianAbsLogError + ' vs ' + fit.baselineFullSampleMedianAbsLogError + '): the old model fits the training data better and generalizes worse — which is why the folds, not the full sample, decide. A typical prediction still misses by a factor of about e to that error — so the panel reports the miss, not just the win. Fitted power law: log(market cap) = ' + fit.finalModel.intercept.toFixed(3) + ' + ' + fit.finalModel.slope.toFixed(3) + ' x log(TVL), ridge penalty ' + fit.finalModel.lambda + '. ' + (fit.droppedTerms || '') })
     );
   }
 
