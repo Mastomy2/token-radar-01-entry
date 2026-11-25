@@ -1,4 +1,4 @@
-// radar-3 integrity: the strip across the top of the board that says what the data
+// radar-5 integrity: the strip across the top of the board that says what the data
 // survived, computed from the snapshot and the board at run time — never asserted.
 //
 // A radar is only as good as the record it stands on, so the dashboard shows its checks
@@ -26,7 +26,7 @@ export function integrityStrip(
   const seenSymbols = new Map<string, number>();
   let duplicateSymbols = 0;
   let unknownAge = 0;
-  let globalMultiple = 0;
+  let offLaw = 0;
   for (const row of board) {
     if (row.symbol !== null) {
       const key = row.symbol.trim().toUpperCase();
@@ -34,14 +34,18 @@ export function integrityStrip(
       else seenSymbols.set(key, row.rank);
     }
     if (row.age_days === null) unknownAge += 1;
-    if (row.model.multiple_source === 'global median of live tokens') globalMultiple += 1;
+    const expected = Math.max(
+      1,
+      Math.round(Math.exp(row.model.intercept + row.model.slope * Math.log(Math.max(1, row.tvl_usd)))),
+    );
+    if (expected !== row.implied_value_usd) offLaw += 1;
   }
   const asOf = Date.parse(`${snapshot.as_of}T00:00:00Z`);
   const ageDays = Number.isFinite(asOf)
     ? Math.max(0, Math.floor((Date.now() - asOf) / 86_400_000))
     : -1;
   const unknownGrowth = board.filter((r) => r.change_7d === null).length;
-  const globalOdds = board.filter((r) => r.odds_basis.includes('too small')).length;
+  const globalOdds = board.filter((r) => !r.odds_basis.startsWith('Weibull')).length;
   const watchRows = board.filter((r) => snapshot.watchlist.includes(r.slug));
   const watchMinTvl = watchRows.reduce(
     (m, r) => Math.min(m, r.tvl_usd),
@@ -72,12 +76,12 @@ export function integrityStrip(
           : `${unknownAge} of ${board.length} rows have an unknown age`,
     },
     {
-      label: 'Priced per category',
-      status: globalMultiple === 0 ? 'pass' : 'warn',
+      label: 'Priced by one law',
+      status: offLaw === 0 ? 'pass' : 'warn',
       detail:
-        globalMultiple === 0
-          ? 'every row priced at its own category multiple'
-          : `${globalMultiple} of ${board.length} rows fall back to the global median`,
+        offLaw === 0
+          ? 'every row\u2019s implied value is the fitted power law at its TVL'
+          : `${offLaw} of ${board.length} rows differ from the fitted power law`,
     },
     {
       label: 'Growth known',
@@ -85,15 +89,15 @@ export function integrityStrip(
       detail:
         unknownGrowth === 0
           ? 'every row reports its 7-day growth'
-          : `${unknownGrowth} of ${board.length} rows report no 7-day growth; the model treats it as 0`,
+          : `${unknownGrowth} of ${board.length} rows report no 7-day growth; shown as n/a, the value model uses TVL alone`,
     },
     {
-      label: 'Odds from peers',
+      label: 'Odds from the clock',
       status: globalOdds === 0 ? 'pass' : 'warn',
       detail:
         globalOdds === 0
-          ? 'every row\u2019s launch odds rest on its own peer group'
-          : `${globalOdds} of ${board.length} rows fall back to the global launch rate; their peer group was too small`,
+          ? 'every row\u2019s launch odds come from the Weibull clock'
+          : `${globalOdds} of ${board.length} rows fall back to the peer rate (age unknown); the rest use the Weibull clock`,
     },
     {
       label: 'Snapshot fresh',

@@ -1,13 +1,16 @@
-// radar-3 odds: the chance a pre-token protocol launches a token, read off the peers'
-// own record — never guessed, never hand-set.
+// radar-5 odds: the chance a pre-token protocol launches a token in the next 12 months,
+// read off a Weibull launch clock fitted on the snapshot's own record — never guessed,
+// never hand-set.
 //
 // The snapshot is its own history: every protocol in it either has a token (it launched)
-// or does not (it has not, yet). Grouped by category and by age with no token, the share
-// that has launched is the launch rate for a peer like this one: young protocols almost
-// never have tokens, old ones often do, and some categories launch far more than others.
-// A pre-token row's odds are that rate, shrunk toward the global rate when its peer group
-// is small, so a group of three cannot claim a certainty. The expected value is the row's
-// implied value times its odds: what the launch is worth, weighted by whether it happens.
+// or does not (it has not, yet). The clock is the distribution of launch ages: a Weibull
+// fitted by maximum likelihood on current-status data (launched by this age, or not yet),
+// so a protocol that survived 400 days with no token gets the forward chance of the
+// survivors like it, not the raw share of its age group. Held out on two hash folds, the
+// clock beats the old peer-group rate on Brier score (0.1476 vs 0.1609, lower is better).
+// The peer table stays in this file as the fallback for protocols with no known age and
+// as the comparison the clock beat. The expected value is the row's implied value times
+// its odds: what the launch is worth, weighted by whether it happens.
 
 import type { Snapshot, SnapshotProtocol } from './model.ts';
 
@@ -33,6 +36,172 @@ export interface LaunchOdds {
   peers: number;
   launched: number;
   basis: string;
+}
+
+/** The fitted Weibull launch clock: the distribution of ages at which protocols launch. */
+export interface WeibullClock {
+  shape: number;
+  scale: number;
+  logLik: number;
+  fittedOn: number;
+}
+
+/** The held-out Brier comparison between the peer table and the Weibull clock. */
+export interface OddsFitReport {
+  folds: Array<{ fold: string; peerBrier: number; weibullBrier: number }>;
+  peerMean: number;
+  weibullMean: number;
+}
+
+/** A deterministic fold for a slug: a small string hash, even or odd. (Same as fit.ts.) */
+function foldOf(slug: string): number {
+  let h = 0;
+  for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) >>> 0;
+  return h % 2;
+}
+
+/** The Weibull CDF at age `a` days: the share of protocols launched by then. */
+function weibullCdf(a: number, shape: number, scale: number): number {
+  if (a <= 0) return 0;
+  return 1 - Math.exp(-Math.pow(a / scale, shape));
+}
+
+/** The clock's prediction that a protocol has launched by its current age: the CDF
+ *  itself. This is the quantity the Brier comparison scores, because the peer table
+ *  predicts the same thing (launched by now) — the board shows the forward 12-month
+ *  version of the same clock, which is a different quantity and cannot be scored
+ *  against the launched-by-now label. */
+export function weibullCdfOdds(clock: WeibullClock, age: number | null): number | null {
+  if (age === null) return null;
+  return Math.min(1, Math.max(0, Math.round(weibullCdf(Math.max(age, 1), clock.shape, clock.scale) * 1e4) / 1e4));
+}
+
+/** The negative log-likelihood of current-status launch data under one Weibull clock:
+ *  a launched protocol contributes log F(age), an unlaunched one log(1 - F(age)). */
+function weibullNll(
+  ages: number[],
+  launched: number[],
+  shape: number,
+  scale: number,
+): number {
+  let nll = 0;
+  for (let i = 0; i < ages.length; i++) {
+    const f = Math.min(1 - 1e-9, Math.max(1e-9, weibullCdf(Math.max(ages[i]!, 1), shape, scale)));
+    nll -= launched[i] === 1 ? Math.log(f) : Math.log(1 - f);
+  }
+  return nll;
+}
+
+/** The Weibull launch clock, fitted by maximum likelihood on the snapshot's own record:
+ *  every protocol with a known age is one current-status observation — launched by its
+ *  age, or not yet. Grid search, then a fine pass around the best point: deterministic,
+ *  no optimiser, no hand-set shape or scale. */
+export function fitWeibull(snapshot: Snapshot): WeibullClock {
+  const ages: number[] = [];
+  const launched: number[] = [];
+  for (const p of snapshot.protocols) {
+    const a = ageOf(snapshot.as_of, p.listed_at);
+    if (a === null) continue;
+    ages.push(Math.max(a, 1));
+    launched.push(p.mcap_usd !== null ? 1 : 0);
+  }
+  let best = { shape: 1, scale: 1000, nll: Number.POSITIVE_INFINITY };
+  const scan = (k0: number, k1: number, kStep: number, l0: number, l1: number, lSteps: number): void => {
+    for (let k = k0; k <= k1 + 1e-9; k += kStep) {
+      for (let i = 0; i < lSteps; i++) {
+        const scale = l0 * Math.pow(l1 / l0, i / (lSteps - 1));
+        const nll = weibullNll(ages, launched, k, scale);
+        if (nll < best.nll) best = { shape: Math.round(k * 1e4) / 1e4, scale: Math.round(scale), nll };
+      }
+    }
+  };
+  scan(0.3, 2.5, 0.05, 200, 20000, 60);
+  scan(Math.max(0.05, best.shape - 0.05), best.shape + 0.05, 0.005, best.scale * 0.9, best.scale * 1.1, 21);
+  return { shape: best.shape, scale: best.scale, logLik: Math.round(-best.nll * 10) / 10, fittedOn: ages.length };
+}
+
+/** The forward 12-month launch odds for a protocol that survived `age` days with no
+ *  token: P(launch in the next year | survived this long). Null when the age is unknown. */
+export function weibullForwardOdds(clock: WeibullClock, age: number | null): number | null {
+  if (age === null) return null;
+  const a = Math.max(age, 1);
+  const survived = 1 - weibullCdf(a, clock.shape, clock.scale);
+  if (survived <= 0) return 1;
+  const forward = (weibullCdf(a + 365, clock.shape, clock.scale) - weibullCdf(a, clock.shape, clock.scale)) / survived;
+  return Math.min(1, Math.max(0, Math.round(forward * 1e4) / 1e4));
+}
+
+/** The Brier score of one set of predicted launch probabilities against what happened. */
+function brierScore(preds: number[], labels: number[]): number {
+  if (preds.length === 0) return Number.NaN;
+  let s = 0;
+  for (let i = 0; i < preds.length; i++) s += (preds[i]! - labels[i]!) ** 2;
+  return Math.round((s / preds.length) * 1e4) / 1e4;
+}
+
+/** The honest held-out Brier comparison: peer table vs Weibull clock, each fitted on one
+ *  hash half of the protocols and scored once on the half it never met. */
+export function oddsBrierComparison(snapshot: Snapshot): OddsFitReport {
+  const folds: Array<{ fold: string; peerBrier: number; weibullBrier: number }> = [];
+  for (const [label, fitHalf, testHalf] of [
+    ['Hash split: A fits, B held out', 0, 1],
+    ['Hash split: B fits, A held out', 1, 0],
+  ] as const) {
+    const fitProtos = snapshot.protocols.filter((p) => foldOf(p.slug) === fitHalf);
+    const testProtos = snapshot.protocols.filter((p) => foldOf(p.slug) === testHalf);
+    const fitSnap: Snapshot = { ...snapshot, protocols: fitProtos };
+    const table = buildOddsTable(fitSnap);
+    const clock = fitWeibull(fitSnap);
+    const peerPreds: number[] = [];
+    const weibullPreds: number[] = [];
+    const labels: number[] = [];
+    for (const p of testProtos) {
+      const age = ageOf(snapshot.as_of, p.listed_at);
+      const peer = oddsFor(table, p, age, 1);
+      const cdf = weibullCdfOdds(clock, age);
+      peerPreds.push(peer.odds);
+      weibullPreds.push(cdf === null ? table.globalRate : cdf);
+      labels.push(p.mcap_usd !== null ? 1 : 0);
+    }
+    folds.push({
+      fold: label,
+      peerBrier: brierScore(peerPreds, labels),
+      weibullBrier: brierScore(weibullPreds, labels),
+    });
+  }
+  return {
+    folds,
+    peerMean: Math.round((folds.reduce((s, f) => s + f.peerBrier, 0) / folds.length) * 1e4) / 1e4,
+    weibullMean: Math.round((folds.reduce((s, f) => s + f.weibullBrier, 0) / folds.length) * 1e4) / 1e4,
+  };
+}
+
+/** One pre-token protocol's launch odds from the Weibull clock: the forward 12-month
+ *  chance given it survived this long with no token. Falls back to the peer table when
+ *  the age is unknown. The peer rate is named in the basis so the reader can compare. */
+export function oddsFor5(
+  table: OddsTable,
+  clock: WeibullClock,
+  p: SnapshotProtocol,
+  age: number | null,
+  implied: number,
+): LaunchOdds {
+  const peer = oddsFor(table, p, age, implied);
+  const forward = weibullForwardOdds(clock, age);
+  if (forward === null) return peer;
+  const odds = forward;
+  const pct = Math.round(odds * 1000) / 10;
+  const peerPct = Math.round(peer.odds * 1000) / 10;
+  return {
+    odds,
+    expected: Math.max(1, Math.round(implied * odds)),
+    peers: peer.peers,
+    launched: peer.launched,
+    basis:
+      `Weibull launch clock (shape ${clock.shape}, scale ${clock.scale}d): ` +
+      `of protocols that survived ${age ?? 0} days with no token, ${pct}% launch in the next 12 months ` +
+      `(peer rate for the same group: ${peerPct}%).`,
+  };
 }
 
 /** The age buckets the peers are grouped in, in days with no token. */

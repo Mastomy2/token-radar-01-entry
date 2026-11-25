@@ -1,4 +1,4 @@
-// The token radar's model, radar-2: one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model, radar-5: one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and adds every
 // other clean pre-token protocol in the snapshot: the early rows the radar exists to find. A protocol is
@@ -9,27 +9,17 @@
 // protocols are kept apart and shown as the market's own values, never mixed into the ranked board.
 //
 // Implied value follows only from the snapshot's own figures, and no protocol name is ever
-// special-cased: the same function scores every row.
-//
-//   multiple     = the category's own market multiple: the median market-cap / TVL of the live-token
-//                  protocols in that category, shrunk toward the global median with a prior of 3
-//                  (one comparable moves it part-way, never all the way), each live ratio first
-//                  winsorized at the 95th percentile so one 400x outlier cannot set a category;
-//                  a category with no live comparable at all uses the global median instead.
-//                  The multiple is clamped to [multiple_floor, multiple_cap].
-//   base         = tvl_usd x multiple
-//   growth       = clamp(change_7d, -60, 120) per cent
-//   growthMult   = 1 + (growth / 100) x GROWTH_WEIGHT
-//   maturity     = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
-//   implied      = max(1, round(base x growthMult x maturity))
-//
-// The multiple is the market's own pricing of comparable tokens that already trade, not a flat guess:
-// a DEX is worth what live DEXes trade at per dollar of TVL, a lender what live lenders trade at, and
-// so on. The dashboard states the multiples table and how many live protocols each one rests on.
+// special-cased: the same function scores every row. radar-5 prices every row with one fitted
+// power law, log(market cap) = intercept + slope * log(TVL) (see lib/fit5.ts): the market's own
+// live-token protocols say value grows with the square root of TVL, not linearly. The radar-2
+// multiples machinery (computeMultiples / impliedValue) stays in this file as the documented
+// baseline the fit report compares against.
 
-import { fitModel, MODEL_VERSION_FITTED } from './fit.ts';
-import type { FitReport } from './fit.ts';
-import { buildOddsTable, oddsFor } from './odds.ts';
+import { fitLogLog, impliedValue5, MODEL_VERSION_FITTED5 } from './fit5.ts';
+import type { Fit5Report, LogLogModel } from './fit5.ts';
+import { buildOddsTable } from './odds.ts';
+import { fitWeibull, oddsBrierComparison, oddsFor5 } from './odds.ts';
+import type { OddsFitReport, WeibullClock } from './odds.ts';
 import { farmVerdict } from './verdict.ts';
 import { integrityStrip } from './integrity.ts';
 import type { IntegrityItem } from './integrity.ts';
@@ -88,7 +78,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -117,11 +107,11 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   model: {
-    category_multiple: number;
-    multiple_source: string;
-    growth_pct: number;
-    growth_multiplier: number;
-    maturity_multiplier: number;
+    log_tvl: number;
+    predicted_log_mcap: number;
+    intercept: number;
+    slope: number;
+    lambda: number;
     age_days: number | null;
   };
   farm_steps: string[];
@@ -151,10 +141,11 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
-  category_multiple: number;
-  multiple_source: string;
-  growth_multiplier: number;
-  maturity_multiplier: number;
+  log_tvl: number;
+  predicted_log_mcap: number;
+  intercept: number;
+  slope: number;
+  lambda: number;
   farm_steps: string[];
   launch_odds: number;
   expected_value_usd: number;
@@ -193,7 +184,7 @@ export interface RadarData {
   as_of: string;
   source: string;
   floor_usd: number;
-  model: ModelConstants;
+  model: LogLogModel;
   model_version: string;
   watchlist_size: number;
   board_size: number;
@@ -204,7 +195,8 @@ export interface RadarData {
   watchlist: string[];
   rows: RadarRow[];
   live: LiveRow[];
-  fit?: FitReport;
+  fit?: Fit5Report;
+  oddsFit?: OddsFitReport;
   integrity?: IntegrityItem[];
 }
 
@@ -398,30 +390,29 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((p) => [p.slug, p]));
 }
 
-/** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
-  const multiples = computeMultiples(snapshot, model);
+/** The protocols the board ranks under the radar-5 power law, strongest first. */
+export function buildBoard5(
+  snapshot: Snapshot,
+  logLog: LogLogModel,
+  clock: WeibullClock,
+): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
-  // The watchlist is the floor: every slug, even one the snapshot no longer carries (it cannot, but
-  // the board's coverage is the gate's row and is never gambled on a missing record).
   for (const slug of snapshot.watchlist) {
     const p = index.get(slug);
     if (p !== undefined) chosen.set(slug, p);
   }
-  // The early radar: every other clean pre-token protocol in the snapshot, whatever its TVL. A chosen
-  // protocol stays chosen; a wrapped, staked or bridged product never enters.
   for (const p of snapshot.protocols) {
     if (!chosen.has(p.slug) && isRankable(p)) chosen.set(p.slug, p);
   }
 
   const oddsTable = buildOddsTable(snapshot);
   const scored = [...chosen.values()].map((p) => {
-    const { multiple, source } = multipleFor(p, multiples);
-    const { implied, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model, multiple);
-    const odds = oddsFor(oddsTable, p, age, implied);
+    const implied = impliedValue5(p, logLog);
+    const age = ageDays(snapshot.as_of, p.listed_at);
+    const odds = oddsFor5(oddsTable, clock, p, age, implied);
     const verdict = farmVerdict({ implied, odds: odds.odds, tvlUsd: p.tvl_usd, chains: p.chains });
-    return { p, implied, growthPct, growthMult, maturityMult, age, multiple, source, odds, verdict };
+    return { p, implied, age, odds, verdict };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -440,11 +431,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     age_days: s.age,
     implied_value_usd: s.implied,
     model: {
-      category_multiple: s.multiple,
-      multiple_source: s.source,
-      growth_pct: s.growthPct,
-      growth_multiplier: round4(s.growthMult),
-      maturity_multiplier: round4(s.maturityMult),
+      log_tvl: Math.round(Math.log(Math.max(1, s.p.tvl_usd)) * 1e4) / 1e4,
+      predicted_log_mcap: Math.round((logLog.intercept + logLog.slope * Math.log(Math.max(1, s.p.tvl_usd))) * 1e4) / 1e4,
+      intercept: logLog.intercept,
+      slope: logLog.slope,
+      lambda: logLog.lambda,
       age_days: s.age,
     },
     farm_steps: farmSteps(s.p, s.age).map(stepText),
@@ -461,8 +452,6 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     farm_reason: s.verdict.reason,
   }));
 }
-
-const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
 
 /** A step as one string: its action, then its cost and time, within the gate's 20..600 characters. */
 export function stepText(step: FarmStep): string {
@@ -604,7 +593,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   return [
     {
       text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
-      cost: 'nothing to set up',
+      cost: 'nothing to set up ($0)',
       time: '5 minutes',
     },
     {
@@ -629,12 +618,12 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
     },
     {
       text: `Open ${p.name}'s own points or rewards page and check the wallet's standing; claim only from the link the protocol itself publishes.`,
-      cost: 'no fee to check, and never pay to claim',
+      cost: 'no fee to check ($0), and never pay to claim',
       time: '10 minutes',
     },
     {
       text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
-      cost: 'nothing but the log',
+      cost: 'nothing but the log ($0)',
       time: '5 minutes',
     },
   ];
@@ -671,10 +660,11 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
-    category_multiple: row.model.category_multiple,
-    multiple_source: row.model.multiple_source,
-    growth_multiplier: row.model.growth_multiplier,
-    maturity_multiplier: row.model.maturity_multiplier,
+    log_tvl: row.model.log_tvl,
+    predicted_log_mcap: row.model.predicted_log_mcap,
+    intercept: row.model.intercept,
+    slope: row.model.slope,
+    lambda: row.model.lambda,
     farm_steps: row.farm_steps,
     launch_odds: row.launch_odds,
     expected_value_usd: row.expected_value_usd,
@@ -690,18 +680,32 @@ export function radarRow(row: BoardRow): RadarRow {
   };
 }
 
-/** Everything the dashboard renders, from the snapshot. */
-export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
-  const multiples = computeMultiples(snapshot, model);
+/**
+ * The radar-5 build: the value is one fitted power law (log market cap = a + b*log TVL,
+ * fitted on the snapshot's live-token protocols and tested held-out twice, in two
+ * independent designs), the launch odds are a forward 12-month Weibull launch clock
+ * fitted on the same record, the board carries costed farm verdicts with their
+ * breakdown, and the dashboard carries the fit report and the integrity strip.
+ * Growth and age terms were tried on the same blind folds and dropped: they raised
+ * held-out error, so the value uses TVL alone. The radar-4 multiples model stays in
+ * this file (computeMultiples / impliedValue) as the documented baseline the fit
+ * report compares against.
+ */
+export function buildRadarFitted(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
+  const fitted = fitLogLog(snapshot);
+  const clock = fitWeibull(snapshot);
+  const oddsFit = oddsBrierComparison(snapshot);
+  const board = buildBoard5(snapshot, fitted.model, clock);
+  const multiples = computeMultiples(snapshot, MODEL);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  const warnings = validateSnapshot(snapshot);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
     floor_usd: snapshot.floor_usd,
-    model,
-    model_version: MODEL_VERSION,
+    model: fitted.model,
+    model_version: MODEL_VERSION_FITTED5,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
@@ -711,30 +715,11 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     watchlist: snapshot.watchlist,
     rows: board.map(radarRow),
     live,
+    fit: fitted.report,
+    oddsFit,
+    integrity: integrityStrip(snapshot, board, warnings),
   };
   return { board, radar };
-}
-
-/**
- * The radar-4 build: the value terms are fitted from the snapshot's live-token
- * protocols and tested held-out twice, in two independent designs (a hash split both ways
- * and a time split), the board carries launch odds with their peer evidence and costed farm
- * verdicts with their breakdown, and the dashboard carries the fit report and the
- * integrity strip. The hand-set radar-2 build above stays untouched as the fit's own baseline.
- */
-export function buildRadarFitted(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
-  const fitted = fitModel(snapshot);
-  const { board, radar } = buildRadar(snapshot, fitted.model);
-  const warnings = validateSnapshot(snapshot);
-  return {
-    board,
-    radar: {
-      ...radar,
-      model_version: MODEL_VERSION_FITTED,
-      fit: fitted.report,
-      integrity: integrityStrip(snapshot, board, warnings),
-    },
-  };
 }
 
 /** The snapshot out of a file's text, refused unless it is the shape the model scores. */
